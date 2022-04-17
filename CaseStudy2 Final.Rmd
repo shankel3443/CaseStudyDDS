@@ -1,0 +1,233 @@
+---
+title: "Case Study 2 Final"
+author: "Garrett Shankel"
+date: "4/15/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Load the necessary libraries
+```{r}
+library(Metrics)
+library(e1071)
+library(caTools)
+library(caret)
+library(vtreat)
+library(reshape2)
+library(ggplot2)
+library(class)
+library(dplyr)
+```
+
+
+# Set up necessary files
+```{r}
+dataset = read.csv("C:/Users/Garrett/Desktop/SMU/DS 6306 Doing Data Science/MSDS_6306_Doing-Data-Science-Master/MSDS_6306_Doing-Data-Science-Master/Unit 14 and 15 Case Study 2/CaseStudy2-data.csv")
+missingSalary = read.csv("C:/Users/Garrett/Desktop/SMU/DS 6306 Doing Data Science/MSDS_6306_Doing-Data-Science-Master/MSDS_6306_Doing-Data-Science-Master/Unit 14 and 15 Case Study 2/CaseStudy2CompSet No Salary.csv")
+missingAttrition = read.csv("C:/Users/Garrett/Desktop/SMU/DS 6306 Doing Data Science/MSDS_6306_Doing-Data-Science-Master/MSDS_6306_Doing-Data-Science-Master/Unit 14 and 15 Case Study 2/CaseStudy2CompSet No Attrition.csv")
+```
+
+# Data Inspection and cleaning
+```{r}
+summary(dataset)
+head(dataset)
+# As can be seen from the summary and a visual inspection of the data the following variables can be removed since they list the same value 
+# for each observation. EmployeeCount Over18 and StandardHours
+
+dataset_mutated = subset(dataset, select = -c(EmployeeCount, Over18, StandardHours))
+
+# The BusinessTravel variable appears to be ordinal. We will use ordinal encoding to convert this variable into an integer
+
+dataset_mutated$BusinessTravel_Encoded = as.numeric(factor(dataset_mutated$BusinessTravel, levels = c("Non-Travel", "Travel_Rarely", "Travel_Frequently")))
+dataset_mutated = subset(dataset_mutated, select = -BusinessTravel)
+
+# The following categorical variables appear to be nominal. Departement, EducationField, Gender, JobRole, MaritalStatus, OverTime
+# We will use One-Hot encoding to convert these variables into integers.
+
+tz <- vtreat::designTreatmentsZ(dataset_mutated, c("Department", "EducationField", "Gender", "JobRole", "MaritalStatus", "OverTime"))
+intermediate_df <- vtreat::prepare(tz, dataset_mutated, extracols = "target")
+#head(intermediate_df)
+intermediate_df = subset(intermediate_df, select = -c(Department_catP, EducationField_catP, JobRole_catP, MaritalStatus_catP))
+dataset_mutated = cbind(dataset_mutated, intermediate_df)
+dataset_mutated = subset(dataset_mutated, select = -c(Department, EducationField, Gender, JobRole, MaritalStatus, OverTime))
+#head(dataset_mutated)
+
+#Finally our independent variable attrition needs to be coded. Since it is a yes or no value we will code it as 0 for No and 1 for Yes
+
+dataset_mutated["Attrition"][dataset_mutated["Attrition"] == "Yes"] <- 1
+dataset_mutated["Attrition"][dataset_mutated["Attrition"] == "No"] <- 0
+```
+
+# Now to refine the variables to be used in the model and build the model
+```{r}
+# First we will build a training and test set with a 80% split
+set.seed(123)
+split = sample.split(dataset_mutated$Attrition, SplitRatio = 0.8)
+trainAttrition = subset(dataset_mutated, split == TRUE)
+testAttrition = subset(dataset_mutated, split == FALSE)
+
+#Now lets create a correlation to view the relationship between the variables
+dataset_mutated = as.data.frame(sapply(dataset_mutated, as.numeric))
+correlation_matrix = round(cor(dataset_mutated), 4)
+
+# We'll extract values with correlations near 0
+mutated_correlation_matrix = melt(correlation_matrix)
+mutated_correlation_matrix[mutated_correlation_matrix$Var1 == "Attrition",] # show values for attrition
+sort(mutated_correlation_matrix[mutated_correlation_matrix$Var1 == "Attrition",]$value, TRUE)[2] # The highest values is obviously 1 for attrition v attrition, what is the second highest?
+
+#overtime is the second highest
+#Job Role sales representative is the third highest
+#Marital Status Single is the fourth highest
+
+### While correlation is a good metric we would like to refine things a little bit more. Using common sense lets take a look at a few interactions that may cause someone to leave / stay at a job
+
+# Marital Status was fourth. 
+dataset %>% ggplot(aes(x = MaritalStatus, fill = Attrition)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Marital Status", y = "Attrition",
+       title = "Marital Status vs Attrition")
+
+# Traveling for work comes with many difficulties. As can be seen from the bar graph, attrition increases as travel increases.
+travel_order = c('Non-Travel', 'Travel_Rarely', 'Travel_Frequently')
+
+dataset %>% ggplot(aes(x = factor(BusinessTravel, level = travel_order), fill = Attrition)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Business Travel", y = "Attrition",
+       title = "Business Travel with Attrition")
+
+# Overtime is another issue for workers. Working too many hours could lead to burnout.
+dataset %>% ggplot(aes(x = OverTime, fill = Attrition)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Over Time", y = "Attrition",
+       title = "Over Time vs Attrition")
+
+# Job Satisfaction would on the surface seem to be a direct indicator of Attrition.
+dataset %>% ggplot(aes(x = JobSatisfaction, fill = Attrition)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Job Satisfaction", y = "Attrition",
+       title = "Job Satisfaction vs Attrition")
+
+# Finally lets look at Job Involvement
+dataset %>% ggplot(aes(x = JobInvolvement, fill = Attrition)) +
+  geom_bar(position = "fill") +
+  scale_y_continuous(labels = scales::percent) +
+  labs(x = "Job Involvement", y = "Attrition",
+       title = "Job Involvement vs Attrition")
+
+
+# Now to narrow these down to three variables lets build a regression model and check the p-values
+model = lm(Attrition ~ ., data = dataset_mutated)
+summary(model)
+
+# Based off of the model the three lowest p values are OverTime, JobInvolvment, and JobSatisfaction.
+
+# Now lets find the optimal k value
+accs = data.frame(accuracy = numeric(300), sensitivity = numeric(300), specificity = numeric(300), k = numeric(300))
+
+for(i in 1:300)
+{
+  classifications = knn(trainAttrition[,c(grep("^JobInvolvement", colnames(dataset_mutated)), grep("^JobSatisfaction", colnames(dataset_mutated)), grep("^OverTime_lev_x", colnames(dataset_mutated)))],
+                      testAttrition[,c(grep("^JobInvolvement", colnames(dataset_mutated)), grep("^JobSatisfaction", colnames(dataset_mutated)), grep("^OverTime_lev_x", colnames(dataset_mutated)))],
+                      trainAttrition$Attrition, prob = TRUE, k = i)
+  table(testAttrition$Attrition, classifications)
+  CM = confusionMatrix(table(testAttrition$Attrition, classifications))
+  accs$accuracy[i] = CM$overall[1]
+  accs$sensitivity[i] = CM$byClass[1]
+  accs$specificity[i] = CM$byClass[2]
+  accs$k[i] = i
+}
+
+plot(accs$k,accs$accuracy, type = "l", xlab = "k") # Accuracy plot based on k values
+plot(accs$k,accs$sensitivity, type = "l", xlab = "k") # Sensitivity plot based on k values
+plot(accs$k,accs$specificity, type = "l", xlab = "k") # Specificity plot based on k values
+
+#based off of the plots k = 3 would be our best value to optimize sensitivity and specificity
+
+classifications = knn(trainAttrition[,c(grep("^JobInvolvement", colnames(dataset_mutated)), grep("^JobSatisfaction", colnames(dataset_mutated)), grep("^OverTime_lev_x", colnames(dataset_mutated)))],
+                      testAttrition[,c(grep("^JobInvolvement", colnames(dataset_mutated)), grep("^JobSatisfaction", colnames(dataset_mutated)), grep("^OverTime_lev_x",                  colnames(dataset_mutated)))],
+                      trainAttrition$Attrition, prob = TRUE, k = 3)
+table(testAttrition$Attrition, classifications)
+CM = confusionMatrix(table(testAttrition$Attrition, classifications))
+CM
+```
+# Now to model Salary
+```{r}
+library(FNN)
+# Again taking the common sense approach. Lets look at the relationship between the categories that would appear to have the largest effect.
+dataset %>% ggplot(aes(x = factor(JobInvolvement), y = MonthlyIncome)) +
+  geom_boxplot() +
+  labs(x = "Job Involvement", y = "Monthly Income",
+       title = "Job Involvement vs Monthly Income") + stat_summary(fun.y = mean)
+
+dataset %>% ggplot(aes(x = reorder(factor(JobRole), MonthlyIncome, FUN = mean), y = MonthlyIncome)) +
+  geom_boxplot() +
+  labs(x = "Job Role", y = "Monthly Income",
+       title = "Job Role vs Monthly Income") + stat_summary(fun.y = mean)
+
+# dataset %>% ggplot(aes(x = reorder(factor(Department), MonthlyIncome, FUN = median), y = MonthlyIncome)) +
+#   geom_boxplot() +
+#   labs(x = "Department", y = "Monthly Income",
+#        title = "Department vs Monthly Income") + stat_summary(fun.y = mean)
+
+dataset %>% ggplot(aes(x = factor(TotalWorkingYears), y = MonthlyIncome)) +
+  geom_boxplot() +
+  labs(x = "Working Years", y = "Monthly Income",
+       title = "Working Years vs Monthly Income") + stat_summary(fun.y = mean)
+
+# dataset %>% ggplot(aes(x = reorder(factor(PercentSalaryHike), MonthlyIncome, FUN = median), y = MonthlyIncome)) +
+#   geom_boxplot() +
+#   labs(x = "Percent Salary Hike", y = "Monthly Income",
+#        title = "Percent Salary Hike vs Monthly Income") + stat_summary(fun.y = mean)
+# 
+# dataset %>% ggplot(aes(x = factor(NumCompaniesWorked), y = MonthlyIncome)) +
+#   geom_boxplot() +
+#   labs(x = "Number of Companies Worked for", y = "Monthly Income",
+#        title = "Number of Companies Worked for vs Monthly Income") + stat_summary(fun.y = mean)
+# 
+# dataset %>% ggplot(aes(x = factor(HourlyRate), y = MonthlyIncome)) +
+#   geom_boxplot() +
+#   labs(x = "Hourly Rate", y = "Monthly Income",
+#        title = "Hourly Rate vs Monthly Income") + stat_summary(fun.y = mean)
+# 
+# dataset %>% ggplot(aes(x = factor(EducationField), y = MonthlyIncome)) +
+#   geom_boxplot() +
+#   labs(x = "Education Field", y = "Monthly Income",
+#        title = "Education Field vs Monthly Income") + stat_summary(fun.y = mean)
+
+
+salary_split = sample.split(dataset_mutated$MonthlyIncome, SplitRatio = 0.8)
+trainSalary = subset(dataset_mutated, split == TRUE)
+testSalary = subset(dataset_mutated, split == FALSE)
+
+rv1 = c()
+
+for(i in 1:300)
+{
+  classifications = knn.reg(trainSalary[,c(grep("^JobInvolvement", colnames(dataset_mutated)), grep("^JobRole", colnames(dataset_mutated)), grep("^TotalWorkingYears", colnames(dataset_mutated)))],
+                      testSalary[,c(grep("^JobInvolvement", colnames(dataset_mutated)), grep("^JobRole", colnames(dataset_mutated)), grep("^TotalWorkingYears", colnames(dataset_mutated)))],
+                      trainSalary$MonthlyIncome, k = i)
+  
+ rv1 = append(rv1, rmse(testSalary$MonthlyIncome, classifications$pred))
+}
+
+plot(rv1) # Accuracy plot based on k values
+# the value k = 6 resulted in the lowest RMSE
+
+ classifications = knn.reg(trainSalary[,c(grep("^JobInvolvement", colnames(dataset_mutated)), grep("^JobRole", colnames(dataset_mutated)), grep("^TotalWorkingYears", colnames(dataset_mutated)))],
+                      testSalary[,c(grep("^JobInvolvement", colnames(dataset_mutated)), grep("^JobRole", colnames(dataset_mutated)), grep("^TotalWorkingYears", colnames(dataset_mutated)))],
+                      trainSalary$MonthlyIncome, k = 6)
+rmse(testSalary$MonthlyIncome, classifications$pred)
+
+
+
+
+
+```
